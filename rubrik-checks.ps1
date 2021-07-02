@@ -4,13 +4,13 @@
 # syntax:
 #	$credential = Get-Credential -UserName admin -Message "Enter the password to use for this connection"
 #	$credential.Password | ConvertFrom-SecureString | Set-Content <file_path_encrypted_password.txt>
-#	$rubrikReport = .\rubrik-documentor.ps1 -server <rubrikIP> -Passwordfile <file_path_encrypted_password.txt>
+#	$rubrikReport = .\rubrik-documentor.ps1 -Target <rubrikIP> -Passwordfile <file_path_encrypted_password.txt> -username "admin"
 #	$rubrikReport | Export-CliXML -Path .\customerRubrik.xml
 #
 #
 #	Syntax:
 # rubrikcreds.txt must contain the password in an encrypted format.
-.\rubrik-checks.ps1 -Passwordfile "D:\scripts\rubrik\rubrikcreds.txt" -username "DOMAIN\administrator" -Target "brik01.lan.local"
+.\rubrik-checks.ps1 -Passwordfile "D:\scripts\rubrik\rubrikcreds.txt" -username "admin" -Target "brik01.lan.local"
 
 #>
 param (
@@ -22,11 +22,14 @@ param (
      [String]$username,
 	#[Parameter(Mandatory = $false,Position = 0,HelpMessage = 'File that contains the encrypted password for the username to be used in this connection')]
 	 #[ValidateNotNullorEmpty()][String]$Passwordfile,
+	 [Parameter(Mandatory = $false,Position = 0,HelpMessage = 'If an AD username, use the Domain FQDN (for example mylan.local)')]
+     [ValidateNotNullorEmpty()]
+     [String]$domain,
 	[Parameter(Mandatory = $true)][string]$Passwordfile,
 	[Parameter(Mandatory = $false)][int]$showLastMonths=3,
 	[Parameter(Mandatory = $false)][string]$logDir=".$([IO.Path]::DirectorySeparatorChar)output",
 	[Parameter(Mandatory = $false)][bool]$LOCALDEBUG=$false,
-	[Parameter(Mandatory = $false)][int]$reportPeriodDays=30,
+	[Parameter(Mandatory = $false)][int]$reportPeriodDays=30, # report for the past 30 days for things like logs etc..
 	[Parameter(Mandatory = $false)][int]$logsCount=100,
 	[Parameter(Mandatory = $false)][int]$topItemsOnly=10,
 	[Parameter(Mandatory = $false)][int]$headerType=1,
@@ -34,16 +37,40 @@ param (
 	[Parameter(Mandatory = $false)][string]$reportIntro="The results of a Rubrik health check can be found below.",
 	[Parameter(Mandatory = $false)][string]$reportHeader="Rubrik Health Check Report",
 	[Parameter(Mandatory = $true)][string]$farmName,
-	[Parameter(Mandatory = $true)][string]$itoContactName
+	[Parameter(Mandatory = $true)][string]$itoContactName,
+	[Parameter(Mandatory = $false)][bool]$showFailures=$true,
+	[Parameter(Mandatory = $false)][bool]$showClusterSummary=$true,
+	[Parameter(Mandatory = $false)][bool]$showClusterNodes=$true,
+	[Parameter(Mandatory = $false)][bool]$showSLAs=$true,
+	[Parameter(Mandatory = $false)][bool]$showClientVMs=$true,
+	[Parameter(Mandatory = $false)][bool]$generateHTMLReport=$true
+
 )
 
 #$silencer = Import-Module -Name ".\rubrik-Module.psm1" -Force:$true
-$silencer = Import-Module -Name ".\genericModule.psm1" -Force:$true
+#$silencer = Import-Module -Name "..\..\generic\genericModule.psm1" -Force:$true
+$fileToCheck = ".$([IO.Path]::DirectorySeparatorChar)genericModule.psm1"
+if (Test-Path $fileToCheck -PathType leaf)
+{
+    # import module
+	$silencer = Import-Module -Name $fileToCheck  -Force:$true
+}
+$fileToCheck = "..$([IO.Path]::DirectorySeparatorChar)..$([IO.Path]::DirectorySeparatorChar)genericModule.psm1"
+if (Test-Path $fileToCheck -PathType leaf)
+{
+    # import module
+	$silencer = Import-Module -Name $fileToCheck  -Force:$true
+}
+
 Set-Variable -Name scriptName -Value $($MyInvocation.MyCommand.name) -Scope Global
 set-variable -Name logDir -Scope global -Value $logDir
 if (!(Get-Variable -Name logDir -Scope Global -ErrorAction SilentlyContinue)) {
 	set-variable -Name logDir -Scope global -Value $logDir
 }
+# Start Date is oldest, end date is the
+$reportEndDate=(get-date)
+$reportStartDate=(get-date).AddDays(-$reportPeriodDays)
+
 
 logThis -msg "Running $($global:scriptName)"
 #Set-Variable -Name logDir -Value $logDir -Scope Global
@@ -78,9 +105,11 @@ $xml.$reportCategory.Reports["Capacity"]=@{} # where all of the reports will be 
 $reportIndex=-1
 
 
+<# Gather Infrastructure #>
+
+
 #Collection
 # SHOW List of TSM Servers audit in this health check.
-$showClusterSummary=$true
 if ($showClusterSummary)
 {
 	$reportIndex++
@@ -90,26 +119,26 @@ if ($showClusterSummary)
 	Write-Host "Processing $tableHeader Report.."
 	$metaInfo = @()
 	$metaInfo +="tableHeader=$title"
-	$metaInfo +="introduction=Table 'x' provides a summary of the Rubrik appliance."
+	$metaInfo +="introduction=Table $($reportIndex+1) provides a summary of the Rubrik appliance."
 	$metaInfo +="chartable=false"
 	$metaInfo +="titleHeaderType=h$($headerType)"
 	#$metaInfo +="calculatetotals=1,2,3,4,5,6,7,8,9,10" # Calculate Total for columns 1,2,3,xxxx - Note, column 0 is the first column.
 	$metaInfo +="displayTableOrientation=List" # options are List or Table
 	$xml.$reportCategory.Reports.Capacity[$reportIndex] = @{}
-	$clusterInfo = Get-RubrikClusterInfo
-	$clusterStorage = Get-RubrikClusterStorage
-
+	$xml.$reportCategory.Infrastructure["ClusterInfo"] = Get-RubrikClusterInfo
+	$xml.$reportCategory.Infrastructure["ClusterStorage"] =  Get-RubrikClusterStorage	
+	
 	$dataTable = New-Object System.Object
-	$dataTable | Add-Member -MemberType NoteProperty -Name "Cluster Name" -Value $clusterInfo.Name
-	$dataTable | Add-Member -MemberType NoteProperty -Name "Platform" -Value $clusterInfo.Platform
-	$dataTable | Add-Member -MemberType NoteProperty -Name "Software Version" -Value $clusterInfo.softwareVersion
-	$dataTable | Add-Member -MemberType NoteProperty -Name "Status" -Value $clusterInfo.ClusterStatus
-	$dataTable | Add-Member -MemberType NoteProperty -Name "Brik Count" -Value $clusterInfo.BrikCount
-	$dataTable | Add-Member -MemberType NoteProperty -Name "Node Count" -Value $clusterInfo.NodeCount
-	$dataTable | Add-Member -MemberType NoteProperty -Name "Integrated with Polaris" -Value $clusterInfo.ConnectedToPolaris
-	$dataTable | Add-Member -MemberType NoteProperty -Name "Capacity" -Value "$($clusterInfo.CPUCoresCount) CPU Cores, $($clusterInfo.MemoryCapacityInGb) GB of Memory, $($clusterStorage.DiskCapacityInTb) TB of Capacity"
+	$dataTable | Add-Member -MemberType NoteProperty -Name "Cluster Name" -Value $xml.$reportCategory.Infrastructure.ClusterInfo.Name
+	$dataTable | Add-Member -MemberType NoteProperty -Name "Platform" -Value $xml.$reportCategory.Infrastructure.ClusterInfo.Platform
+	$dataTable | Add-Member -MemberType NoteProperty -Name "Software Version" -Value $xml.$reportCategory.Infrastructure.ClusterInfo.softwareVersion
+	$dataTable | Add-Member -MemberType NoteProperty -Name "Status" -Value $xml.$reportCategory.Infrastructure.ClusterInfo.ClusterStatus
+	$dataTable | Add-Member -MemberType NoteProperty -Name "Brik Count" -Value $xml.$reportCategory.Infrastructure.ClusterInfo.BrikCount
+	$dataTable | Add-Member -MemberType NoteProperty -Name "Node Count" -Value $xml.$reportCategory.Infrastructure.ClusterInfo.NodeCount
+	$dataTable | Add-Member -MemberType NoteProperty -Name "Integrated with Polaris" -Value $xml.$reportCategory.Infrastructure.ClusterInfo.ConnectedToPolaris
+	$dataTable | Add-Member -MemberType NoteProperty -Name "Capacity" -Value "$($xml.$reportCategory.Infrastructure.ClusterInfo.CPUCoresCount) CPU Cores, $($xml.$reportCategory.Infrastructure.ClusterInfo.MemoryCapacityInGb) GB of Memory, $($xml.$reportCategory.Infrastructure.ClusterStorage.DiskCapacityInTb) TB of Capacity"
 
-	$clusterStorage.GetEnumerator() | Select-Object Key,Value | ForEach-Object {
+	$xml.$reportCategory.Infrastructure.ClusterStorage.GetEnumerator() | Select-Object Key,Value | ForEach-Object {
 		$clusterStorageKey = $_.Key
 		$clusterStorageValue = $_.Value
 		$string = ($clusterStorageKey.substring(0,1).toupper() + $clusterStorageKey.substring(1) -creplace '[A-Z]', ' $&').Trim();
@@ -124,7 +153,7 @@ if ($showClusterSummary)
 
 
 # List Cluster Nodes
-$showClusterNodes=$true
+
 if ($showClusterNodes)
 {
 	$reportIndex++
@@ -134,15 +163,15 @@ if ($showClusterNodes)
 	logThis -msg "Processing $tableHeader Report"
 	$metaInfo = @()
 	$metaInfo +="tableHeader=$title"
-	$metaInfo +="introduction=Table 'x' presents a list of server components of the Rubrik appliance."
+	$metaInfo +="introduction=Table $($reportIndex+1) presents a list of server components of the Rubrik appliance."
 	$metaInfo +="chartable=false"
 	$metaInfo +="titleHeaderType=h$($headerType)"
 	#$metaInfo +="calculatetotals=1,2,3,4,5,6,7,8,9,10" # Calculate Total for columns 1,2,3,xxxx - Note, column 0 is the first column.
 	$metaInfo +="displayTableOrientation=Table" # options are List or Table
 	$xml.$reportCategory.Reports.Capacity[$reportIndex] = @{}
-	$clusterNodes = Get-RubrikNode
+	$xml.$reportCategory.Infrastructure["ClusterNodes"] = Get-RubrikNode
 	$dataTable = @()
-	$clusterNodes | sort-object -Property BrikId | ForEach-Object {
+	$xml.$reportCategory.Infrastructure.ClusterNodes | sort-object -Property BrikId | ForEach-Object {
 		$clusterNode = $_
 		$obj = New-Object System.Object
 		$obj | Add-Member -MemberType NoteProperty -Name "Node Id" -Value $clusterNode.Id
@@ -155,8 +184,7 @@ if ($showClusterNodes)
 	$xml.$reportCategory.Reports.Capacity.$reportIndex["DataTable"] = $dataTable
 }
 
-# List SLAs
-$showSLAs=$true
+# Export SLA Domains
 if ($showSLAs)
 {
 	$reportIndex++
@@ -167,15 +195,14 @@ if ($showSLAs)
 	$xml.$reportCategory.Reports.Capacity[$reportIndex] = @{}
 	$metaInfo = @()
 	$metaInfo +="tableHeader=$title"
-	$metaInfo +="introduction=Table 'x' provides a summary of configured Rubrik SLAs."
+	$metaInfo +="introduction=Table $($reportIndex+1) provides a summary of configured Rubrik SLAs."
 	$metaInfo +="chartable=false"
 	$metaInfo +="titleHeaderType=h$($headerType)"
 	#$metaInfo +="calculatetotals=1,2,3,4,5,6,7,8,9,10" # Calculate Total for columns 1,2,3,xxxx - Note, column 0 is the first column.
 	$metaInfo +="displayTableOrientation=Table" # options are List or Table
-	$clusterSLAs = Get-RubrikSLA
-
+	$xml.$reportCategory.Infrastructure["SLAs"] = Get-RubrikSLA	
 	$dataTable = @()
-	$clusterSLAs | sort-object -Property Name | ForEach-Object {
+	$xml.$reportCategory.Infrastructure.SLAs | sort-object -Property Name | ForEach-Object {
 		Write-Host "`t-> Processing SLA :- $($clusterSLA.Name)"
 		$clusterSLA = $_
 		$obj = New-Object System.Object
@@ -197,17 +224,21 @@ if ($showSLAs)
 		$obj | Add-Member -MemberType NoteProperty -Name "Schedules and Retention" -Value "$backupSchedule"
 
 		# Iterate through the protected objects
-		$objectsProtectedString="$($clusterSLA.'numProtectedObjects') in Total"
-		$objectsProtected = ($clusterSLA | Get-Member -MemberType NoteProperty | Where-Object {$_.Name -like "num*"}).Name | Where-Object {$_ -ne "numProtectedObjects"}
-		$objectsProtected | ForEach-Object {
-			$objectName = $_
-			if ($clusterSLA.$objectName -gt 0)
-			{
-				$objectNameShorthand = $objectName -replace 'num',''
-				$objectsProtectedString += "`n$($clusterSLA.$objectName) x $objectNameShorthand"
+		$objectsProtectedString="$($clusterSLA.'numProtectedObjects') in Total: "
+		if ($clusterSLA.'numProtectedObjects' -eq 0)
+		{
+		} elseif ($clusterSLA.'numProtectedObjects' -gt 0) 
+		{
+			$objectsProtected = ($clusterSLA | Get-Member -MemberType NoteProperty | Where-Object {$_.Name -like "num*"}).Name | Where-Object {$_ -ne "numProtectedObjects"}
+			$objectsProtected | ForEach-Object {
+				$objectName = $_
+				if ($clusterSLA.$objectName -gt 0)
+				{
+					$objectNameShorthand = $objectName -replace 'num',''
+					$objectsProtectedString += "`n$($clusterSLA.$objectName) x $objectNameShorthand"
+				}
 			}
 		}
-
 		$obj | Add-Member -MemberType NoteProperty -Name "Protected Objects" -Value "$objectsProtectedString"
 
 		$dataTable += $obj
@@ -217,17 +248,21 @@ if ($showSLAs)
 }
 
 # List Client being backed up
-$showClientVMs=$true
+
 if ($showClientVMs)
 {
 	# Gather the information required
 	#$vms = Get-RubrikVM | where-Object {$_.Name -notlike "*OmniStackVC*"} | Sort-Object Name -Unique | Select-Object -First 5
-	$vms = Get-RubrikVM | where-Object {$_.Name -notlike "*OmniStackVC*"} | Sort-Object Name -Unique
-	$totalVMs = ($vms | measure-object).Count
-	$unprotectedVMCount = ($vms | Where-Object {$_.effectiveSlaDomainName -like "Unprotected"} | Measure-Object).Count
-	$protectedVMs = $vms | Where-Object {$_.effectiveSlaDomainName -notlike "Unprotected"}
+	#$vms = Get-RubrikVM | where-Object {$_.Name -notlike "*OmniStackVC*"} | Sort-Object Name -Unique
+	$xml.$reportCategory.Infrastructure["VMs"] = Get-RubrikVM | where-Object {$_.Name -notlike "*OmniStackVC*"} | Sort-Object Name -Unique
+	$totalVMs = ($xml.$reportCategory.Infrastructure.VMs | measure-object).Count
+	$unprotectedVMCount = ($xml.$reportCategory.Infrastructure.VMs | Where-Object {$_.effectiveSlaDomainName -like "Unprotected"} | Measure-Object).Count
+	$protectedVMs = $xml.$reportCategory.Infrastructure.VMs | Where-Object {$_.effectiveSlaDomainName -notlike "Unprotected"}
 	$protectedVMsCount = ($protectedVMs | Measure-Object).Count
 
+	# previous version of Rubrik API the each events had a 'Date' field which this script scrapes. In modern API, Date is replaced with 'Time'. This sets the default to 'Date' then checks 
+	# further down if the event.Time exists instead of event.Date, then changes it to Time.
+	$timefilter="Date"
 
 	#########
 	#
@@ -238,7 +273,7 @@ if ($showClientVMs)
 	Write-Host "Processing $tableHeader Report.."
 	$metaInfo = @()
 	$metaInfo +="tableHeader=$title"
-	$metaInfo +="introduction=Table 'x' provides a summary of VM backups."
+	$metaInfo +="introduction=Table $($reportIndex+1) provides a summary of VM backups."
 	$metaInfo +="chartable=false"
 	$metaInfo +="titleHeaderType=h$($headerType)"
 	#$metaInfo +="calculatetotals=1,2,3,4,5,6,7,8,9,10" # Calculate Total for columns 1,2,3,xxxx - Note, column 0 is the first column.
@@ -277,44 +312,66 @@ if ($showClientVMs)
 	Write-Host "Processing $tableHeader Report.."
 	$metaInfo = @()
 	$metaInfo +="tableHeader=$title"
-	$metaInfo +="introduction=Table 'x' provides a summary of VMs."
+	$metaInfo +="introduction=Table $($reportIndex+1) provides a summary list of protected VM and some capacity information for each."
 	$metaInfo +="chartable=false"
 	$metaInfo +="titleHeaderType=h$($headerType)"
 	#$metaInfo +="calculatetotals=1,2,3,4,5,6,7,8,9,10" # Calculate Total for columns 1,2,3,xxxx - Note, column 0 is the first column.
 	$metaInfo +="displayTableOrientation=Table" # options are List or Table
 	$xml.$reportCategory.Reports.Capacity[$reportIndex] = @{}
 	$vmindex=1
+	
 	$dataTable = @()
 	$protectedVMs | sort-object -Property Name  | ForEach-Object {
 		$protectedVM = $_
+		# If the VM is protected say it
+		#if (!$xml.$reportCategory.Infrastructure.VMs["$($protectedVM.Name)"])
+		#{
+			$xml.$reportCategory.Infrastructure.VMs["$($protectedVM.Name)"].Protected = $true
+		#}
 		Write-Host "`t-> Processing VM $vmindex/$(($protectedVMs | measure-object).Count):- $($protectedVM.Name.ToUpper()).."
-		$vmEvents = Get-RubrikEvent -Objectname $protectedVM.Name -Status Failure -Limit 1000
+		# Search for event failures between $reportStartDate and $reportEndDate
+
+		#$vmEvents = Get-RubrikEvent -Objectname $protectedVM.Name -Status Failure -BeforeDate $reportEndDate -AfterDate $reportStartDate
+		#$xml.$reportCategory.Infrastructure["VMEvents"] = Get-RubrikEvent -Objectname $protectedVM.Name -Status Failure -BeforeDate $reportEndDate -AfterDate $reportStartDate
+		#$xml.$reportCategory.Infrastructure.VMs["$($protectedVM.Name)"]["VMEvents"] = Get-RubrikEvent -Objectname $protectedVM.Name -Status Failure -BeforeDate $reportEndDate -AfterDate $reportStartDate
+		logThis -msg "`t`t[ reportEndDate = $reportEndDate, reportEndDate=$reportEndDate ]"
+		$xml.$reportCategory.Infrastructure.VMs["$($protectedVM.Name)"]["VMEvents"] = Get-RubrikEvent -Objectname $protectedVM.Name -Status Failure -BeforeDate $reportStartDate -AfterDate $reportEndDate
+		
 		#$recentBackup = $events | Sort-Object -Property Date -Descending | select-object -First 1
 		#$oldestBackup = $events | Sort-Object -Property Date -Descending | select-object -Last 1
 		$snapshotBackups = $protectedVM | Get-RubrikSnapshot | Sort-Object Date
+		$xml.$reportCategory.Infrastructure.VMs["$($protectedVM.Name)"]["Snapshots"] = $protectedVM | Get-RubrikSnapshot | Sort-Object Date
+		#if ($xml.$reportCategory.Infrastructure.VMs)
+		
 		$recentBackup = $snapshotBackups | Select-Object -Last 1
 		$oldestBackup  = $snapshotBackups | Select-Object -First 1
 		$obj = New-Object System.Object
 		$obj | Add-Member -MemberType NoteProperty -Name "VM Name" -Value "$($protectedVM.Name.ToUpper())"
 		$obj | Add-Member -MemberType NoteProperty -Name "SLA" -Value "$($protectedVM.effectiveSlaDomainName)"
 		$obj | Add-Member -MemberType NoteProperty -Name "Cluster" -Value "$($protectedVM.clusterName)"
-
-		if ( (($vmEvents | measure-object).Count -gt 0) -and ($vmEvents.data))
+		
+		if ( (($xml.$reportCategory.Infrastructure.VMEvents | measure-object).Count -gt 0) -and ($xml.$reportCategory.Infrastructure.VMEvents.data))
 		{
 			#Write-Host $vmEvents
-			#$vmEvents | Export-CliXML -Path "$($global:logDir)\$($protectedVM.Name.ToUpper())_failures_all.xml"
+			#$xml.$reportCategory.Infrastructure.VMEvents | Export-CliXML -Path "$($global:logDir)\$($protectedVM.Name.ToUpper())_failures_all.xml"
 			#pause
-			# if the event is less than 30 days process it
+			# if the event is less than $reportPeriodDays days process it
 			$eventsString="None"
 			$eventErrorCount=0
-			$eventsLast30days = @()
-			$vmEvents | ForEach-Object {
+			$eventsLastDays = @()
+			$xml.$reportCategory.Infrastructure.VMEvents | ForEach-Object {
 				$myEvent = $_
 				$eventsString=""
-				if ((get-date $myEvent.date) -gt (get-date).AddDays(-30))
+				if ($myEvent.date){
+					$timefilter="Date"
+				} elseif ($myEvent.Time) {
+					$timefilter="Time"
+				}
+				# was if ((get-date $myEvent.Date) -gt (get-date).AddDays(-$reportPeriodDays))
+				if ((get-date $myEvent.$timefilter) -gt (get-date).AddDays(-$reportPeriodDays))
 				{
 					$eventErrorCount++
-					$eventsLast30days += $myEvent
+					$eventsLastDays += $myEvent
 					#$eventInfo=$myEvent.eventInfo -replace '{"message":','' -replace '"','' -replace ',"params":{}}',''
 					#$eventsString += "$eventInfo"
 				}
@@ -322,11 +379,11 @@ if ($showClientVMs)
 			#$eventErrorCount++
 			#if ($eventErrorCount -gt 1)
 			#{
-				#$eventsLast30days | Export-CliXML -Path "$($global:logDir)\$($protectedVM.Name.ToUpper())_failures_30DaysLess.xml"
+				#$eventsLastDays | Export-CliXML -Path "$($global:logDir)\$($protectedVM.Name.ToUpper())_failures_$(eventsLastDays)DaysLess.xml"
 			#}
-			$obj | Add-Member -MemberType NoteProperty -Name "Failures (last 30 days)" -Value "$eventErrorCount errors found, $eventsString"
+			$obj | Add-Member -MemberType NoteProperty -Name "Failures (last $reportPeriodDays days)" -Value "$eventErrorCount errors found, $eventsString"
 		} else {
-			$obj | Add-Member -MemberType NoteProperty -Name "Failures (last 30 days)" -Value "None"
+			$obj | Add-Member -MemberType NoteProperty -Name "Failures (last $reportPeriodDays days)" -Value "None"
 		}
 		#$obj | Add-Member -MemberType NoteProperty -Name "Oldest Backup" -Value "$($oldestBackup.Date) ($($oldestBackup.eventStatus))"
 		<#
@@ -343,9 +400,16 @@ vmName                 : VCSWKSTEST04
 consistencyLevel       : CRASH_CONSISTENT
 
 #>
-		$backupString = "$(($snapshotBackups | measure-object).Count) backups found"
-		$backupString += ", Latest taken on $((get-date $recentBackup.date))"
-		$backupString += ", Oldest taken on $((get-date $oldestBackup.date))"
+		# Reset
+		$backupString=""
+		#$backupString = "$(($snapshotBackups | measure-object).Count) backups found"
+		$obj | Add-Member -MemberType NoteProperty -Name "Backups Found" -Value ($snapshotBackups | measure-object).Count
+		#$backupString += ", Latest taken on $((get-date $recentBackup.date))"
+		$obj | Add-Member -MemberType NoteProperty -Name "Latest" -Value (get-date $recentBackup.date)
+
+		#$backupString += ", Oldest taken on $((get-date $oldestBackup.date))"
+		$obj | Add-Member -MemberType NoteProperty -Name "Oldest" -Value (get-date $oldestBackup.date)
+
 		$snapshotBackups | Group-Object cloudState | Select-Object Name,Count | ForEach-Object {
 			$backupGroup = $_
 			switch ($backupGroup.Name)
@@ -357,7 +421,8 @@ consistencyLevel       : CRASH_CONSISTENT
 			}
 		}
 
-		$obj | Add-Member -MemberType NoteProperty -Name "Backups" -Value "$backupString"
+		$obj | Add-Member -MemberType NoteProperty -Name "Location" -Value "$backupString"
+		$obj | Add-Member -MemberType NoteProperty -Name "Total data stored (GB)" -Value "TBA"
 		$dataTable += $obj
 		$vmindex++
 	}
@@ -366,45 +431,69 @@ consistencyLevel       : CRASH_CONSISTENT
 	$xml.$reportCategory.Reports.Capacity.$reportIndex["DataTable"] = $dataTable
 }
 
-$showFailures=$false
 if ($showFailures)
 {
-	$reportIndex++
-	$failures = Get-RubrikEvent -Status "Failure" -ShowOnlyLatest
-	$title="Recent Events"
-	$tableHeader="$title"
-	Write-Host "Processing $tableHeader Report.."
-	$metaInfo = @()
-	$metaInfo +="tableHeader=$title"
-	$metaInfo +="introduction=Table 'x' provides a summary recent failure events. A total of $(($failures | Measure-Object).Count) were found."
-	$metaInfo +="chartable=false"
-	$metaInfo +="titleHeaderType=h$($headerType)"
-	#$metaInfo +="calculatetotals=1,2,3,4,5,6,7,8,9,10" # Calculate Total for columns 1,2,3,xxxx - Note, column 0 is the first column.
-	$metaInfo +="displayTableOrientation=List" # options are List or Table
-	$xml.$reportCategory.Reports.Capacity[$reportIndex] = @{}
-	$dataTable = @()
 
-	$failures | group-object objectType | ForEach-Object {
-		$eventObjectType = $_
-		$eventObjectType.Group | Group-Object EventType | ForEach-Object {
-			$event = $_
-			$message = @()
-			$event.Group.eventinfo  | ForEach-Object {
-				$message += $_ -replace '{"message":','' -replace '"','' -replace ',params:{}}',''
-				$obj = New-Object System.Object
-				$obj | Add-Member -MemberType NoteProperty -Name "Type" -Value "$($eventObjectType.Name)" #$($event.Name)"
-				$obj | Add-Member -MemberType NoteProperty -Name "Message" -Value "$message"
-				$dataTable += $obj
-			}
+	#$failureGroups = Get-RubrikEvent -Status "Failure" -BeforeDate $reportEndDate -AfterDate $reportStartDate | group-object -Property ObjectType
+	$xml.$reportCategory.Infrastructure["Failures"] = Get-RubrikEvent -Status "Failure" -BeforeDate $reportEndDate -AfterDate $reportStartDate | group-object -Property ObjectType
+	# For each Event Type create one of these
 
+	$xml.$reportCategory.Infrastructure.Failures | ForEach-Object {
+		$failureGroup = $_
+		$failureGroupName = [string]($failureGroup.Name -csplit "([A-Z][a-z]+)" | Where-Object { $_ })
+		$reportIndex++
+		$title="$failureGroupName Events"
+		$tableHeader="$title"
+		Write-Host "Processing $tableHeader Report.."
+		$metaInfo = @()
+		$metaInfo +="tableHeader=$title"
+		$summaryStr = "<n/a>"
+		if (($failureGroup.Group | Measure-Object).Count -eq 1)
+		{
+			$summaryStr = "Only $(($failureGroup.Group | Measure-Object).Count) concerning event was recorded"
+		} else {
+			$summaryStr = "$(($failureGroup.Group | Measure-Object).Count) concerning events were recorded"
 		}
+		$metaInfo +="introduction=Table $($reportIndex+1) lists $failureGroupName events for the past $reportPeriodDays days. $summaryStr. The events are listed in reverse-chronological order."
+		$metaInfo +="chartable=false"
+		$metaInfo +="titleHeaderType=h$($headerType)"
+		#$metaInfo +="calculatetotals=1,2,3,4,5,6,7,8,9,10" # Calculate Total for columns 1,2,3,xxxx - Note, column 0 is the first column.
+		$metaInfo +="displayTableOrientation=table" # options are List or Table
+		$xml.$reportCategory.Reports.Capacity[$reportIndex] = @{}
+		$dataTable = @()
+		$failureGroup.Group | Sort-object -Property "$timefilter" | ForEach-Object {
+			$event = $_
+			$obj = New-Object System.Object
+			$obj | Add-Member -MemberType NoteProperty -Name "$timefilter" -Value $_.date
+			
+			# For Cluster events
+			# Message Type: Capture between "message" and "These are:"
+			# Actual Message: capture between "These are:" amd "id"
+			if ([regex]::match($event.eventInfo,"message(.*?)These are").Groups[0].Value)
+			{
+				$errortype = (([regex]::match($event.eventInfo,"message(.*?)These are").Groups[0].Value) -replace "message"":""",": "  -replace "These are" -replace ':').Trim()
+				$errormsg = (([regex]::match($event.eventInfo,"These are(.*?)id").Groups[0].Value) -replace "These are:",": "  -replace """,""id" -replace ':').Trim()
+			} elseif ([regex]::match($event.eventInfo,"message(.*?)Reason").Groups[0].Value)
+			{
+				$errortype = ([regex]::match($event.eventInfo,"message(.*?)Reason").Groups[0].Value) -replace "message:",": "  -replace "Reason:"
+				$errormsg = ([regex]::match($event.eventInfo,"Reason(.*?)id").Groups[0].Value) -replace "Reason:",": "  -replace """,""id"
+			}			
+			$obj | Add-Member -MemberType NoteProperty -Name "Error" -Value "$errortype" 
+			$obj | Add-Member -MemberType NoteProperty -Name "Detail" -Value "$errormsg" 
+			$dataTable  += $obj
+				# Adding the lot in			
+		}
+		$xml.$reportCategory.Reports.Capacity.$reportIndex["MetaData"] = $metaInfo
+		$xml.$reportCategory.Reports.Capacity.$reportIndex["DataTable"] = $dataTable | Sort-Object -Property Date -Descending
+		# iterating		
 	}
-
-	$xml.$reportCategory.Reports.Capacity.$reportIndex["MetaData"] = $metaInfo
-	$xml.$reportCategory.Reports.Capacity.$reportIndex["DataTable"] = $dataTable
 }
 
-$generateHTMLReport=$true
+if ($LOCALDEBUG)
+{
+	$xml | Export-CliXML -Path "$($global:logDir)$($([IO.Path]::DirectorySeparatorChar))$($Target)_audit.xml"
+}
+
 if ($generateHTMLReport)
 {
 	$htmlPage = generateHTMLReport -xml $xml -reportHeader $reportHeader -reportIntro $reportIntro -farmName $farmName -itoContactName $itoContactName
@@ -417,3 +506,4 @@ if ($generateHTMLReport)
 	#}
 }
 return $xml
+
